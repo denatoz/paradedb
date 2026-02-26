@@ -2,13 +2,13 @@ name: Release pg_search
 
 on:
   push:
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g. 0.1.0)'
+        description: "Version to release (e.g. 0.1.0)"
         required: false
-        default: ''
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always

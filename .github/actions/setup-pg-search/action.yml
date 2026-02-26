@@ -5,7 +5,7 @@ inputs:
   pg-version:
     description: PostgreSQL major version
     required: true
-    default: '17'
+    default: "17"
 
 runs:
   using: composite
