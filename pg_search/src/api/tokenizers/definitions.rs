@@ -483,7 +483,7 @@ pub(crate) mod pdb {
 
     define_tokenizer_type!(
         Lindera,
-        SearchTokenizer::Lindera(LinderaLanguage::Chinese, SearchTokenizerFilters::default()),
+        SearchTokenizer::Lindera(LinderaLanguage::Chinese, SearchTokenizerFilters::default(), None),
         tokenize_lindera,
         json_to_lindera,
         jsonb_to_lindera,

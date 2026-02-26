@@ -94,6 +94,7 @@ pub fn search_field_config_from_type(
         "lindera" => SearchTokenizer::Lindera(
             LinderaLanguage::default(),
             SearchTokenizerFilters::default(),
+            None,
         ),
         "icu" => SearchTokenizer::ICUTokenizer(SearchTokenizerFilters::default()),
         "jieba" => SearchTokenizer::Jieba {
@@ -206,12 +207,13 @@ pub fn apply_typmod(tokenizer: &mut SearchTokenizer, typmod: Typmod) {
             *filters = regex_typmod.filters;
         }
 
-        SearchTokenizer::Lindera(style, filters) => {
+        SearchTokenizer::Lindera(style, filters, user_dict) => {
             let lindera_typmod = LinderaTypmod::try_from(typmod).unwrap_or_else(|e| {
                 panic!("{}", e);
             });
             *style = lindera_typmod.language;
             *filters = lindera_typmod.filters;
+            *user_dict = lindera_typmod.user_dict;
         }
 
         #[allow(deprecated)]

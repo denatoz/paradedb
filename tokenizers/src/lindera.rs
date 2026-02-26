@@ -24,12 +24,14 @@
  * By using this file, you agree to comply with the AGPL v3.0 terms.
  *
  */
-use lindera::dictionary::load_dictionary;
+use lindera::dictionary::{load_dictionary, load_user_dictionary_from_csv};
 use lindera::mode::Mode;
 use lindera::token::Token as LinderaToken;
 use lindera::tokenizer::Tokenizer as LinderaTokenizer;
 use once_cell::sync::Lazy;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 
 // Tokenizers with keep_whitespace=true to maintain backward compatibility
@@ -58,6 +60,84 @@ static KOR_TOKENIZER: Lazy<Arc<LinderaTokenizer>> = Lazy::new(|| {
         lindera::segmenter::Segmenter::new(Mode::Normal, dictionary, None).keep_whitespace(true),
     ))
 });
+
+// Cache for tokenizers with user dictionaries, keyed by (language, user_dict_path)
+static USER_DICT_TOKENIZER_CACHE: Lazy<Mutex<HashMap<String, Arc<LinderaTokenizer>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn dict_uri_for_language(language: &str) -> &'static str {
+    match language {
+        "chinese" => "embedded://cc-cedict",
+        "japanese" => "embedded://ipadic",
+        "korean" => "embedded://ko-dic",
+        _ => panic!("unsupported lindera language: {language}"),
+    }
+}
+
+/// Create or retrieve a cached Lindera tokenizer with a user dictionary.
+pub fn get_tokenizer_with_user_dict(
+    language: &str,
+    user_dict_path: &str,
+) -> Arc<LinderaTokenizer> {
+    let cache_key = format!("{language}:{user_dict_path}");
+    let mut cache = USER_DICT_TOKENIZER_CACHE.lock().unwrap();
+    if let Some(tok) = cache.get(&cache_key) {
+        return tok.clone();
+    }
+
+    let dictionary = load_dictionary(dict_uri_for_language(language))
+        .unwrap_or_else(|e| panic!("failed to load {language} dictionary: {e}"));
+
+    let user_dict =
+        load_user_dictionary_from_csv(&dictionary.metadata, Path::new(user_dict_path))
+            .unwrap_or_else(|e| {
+                panic!("failed to load user dictionary from {user_dict_path}: {e}")
+            });
+
+    let tokenizer = Arc::new(LinderaTokenizer::new(
+        lindera::segmenter::Segmenter::new(Mode::Normal, dictionary, Some(user_dict))
+            .keep_whitespace(true),
+    ));
+
+    cache.insert(cache_key, tokenizer.clone());
+    tokenizer
+}
+
+/// A Lindera tokenizer wrapper that uses a custom (user dictionary-loaded) tokenizer instance.
+#[derive(Clone)]
+pub struct LinderaTokenizerWithDict {
+    tokenizer: Arc<LinderaTokenizer>,
+    token: Token,
+}
+
+impl LinderaTokenizerWithDict {
+    pub fn new(tokenizer: Arc<LinderaTokenizer>) -> Self {
+        Self {
+            tokenizer,
+            token: Token::default(),
+        }
+    }
+}
+
+impl Tokenizer for LinderaTokenizerWithDict {
+    type TokenStream<'a> = MultiLanguageTokenStream<'a>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        if text.trim().is_empty() {
+            return MultiLanguageTokenStream::Empty;
+        }
+
+        let lindera_token_stream = LinderaTokenStream {
+            tokens: self
+                .tokenizer
+                .tokenize(text)
+                .expect("Lindera tokenizer with user dictionary failed"),
+            token: &mut self.token,
+        };
+
+        MultiLanguageTokenStream::Lindera(lindera_token_stream)
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct LinderaChineseTokenizer {
@@ -298,5 +378,110 @@ mod tests {
             let tokens = test_helper(&mut tokenizer, "    ");
             assert_eq!(tokens.len(), 0);
         }
+    }
+
+    #[rstest]
+    fn test_korean_tokenizer_with_user_dict() {
+        use std::io::Write;
+
+        let dict_path = std::env::temp_dir().join("lindera_test_user_dict.csv");
+        let mut file = std::fs::File::create(&dict_path).unwrap();
+        writeln!(file, "임플란트식립,NNG,임플란트식립").unwrap();
+        writeln!(file, "치근단절제술,NNG,치근단절제술").unwrap();
+        drop(file);
+
+        let text = "임플란트식립을 진행합니다";
+
+        // Without user dict: "임플란트식립" is split into "임", "플란트", "식", "립"
+        {
+            let mut tokenizer = LinderaKoreanTokenizer::default();
+            let tokens = test_helper(&mut tokenizer, text);
+            // "임" "플란트" "식" "립" "을" " " "진행" "합니다"
+            assert_eq!(tokens.len(), 8);
+            {
+                let token = &tokens[0];
+                assert_eq!(token.text, "임");
+                assert_eq!(token.offset_from, 0);
+                assert_eq!(token.offset_to, 3);
+                assert_eq!(token.position, 0);
+                assert_eq!(token.position_length, 1);
+            }
+            {
+                let token = &tokens[1];
+                assert_eq!(token.text, "플란트");
+                assert_eq!(token.offset_from, 3);
+                assert_eq!(token.offset_to, 12);
+                assert_eq!(token.position, 1);
+                assert_eq!(token.position_length, 1);
+            }
+        }
+
+        // With user dict: "임플란트식립" stays as one token
+        {
+            let tok = get_tokenizer_with_user_dict("korean", dict_path.to_str().unwrap());
+            let mut tokenizer = LinderaTokenizerWithDict::new(tok);
+            let tokens = test_helper(&mut tokenizer, text);
+            // "임플란트식립" "을" " " "진행" "합니다"
+            assert_eq!(tokens.len(), 5);
+            {
+                let token = &tokens[0];
+                assert_eq!(token.text, "임플란트식립");
+                assert_eq!(token.offset_from, 0);
+                assert_eq!(token.offset_to, 18);
+                assert_eq!(token.position, 0);
+                assert_eq!(token.position_length, 1);
+            }
+            {
+                let token = &tokens[3];
+                assert_eq!(token.text, "진행");
+                assert_eq!(token.offset_from, 22);
+                assert_eq!(token.offset_to, 28);
+                assert_eq!(token.position, 3);
+                assert_eq!(token.position_length, 1);
+            }
+        }
+
+        let _ = std::fs::remove_file(&dict_path);
+    }
+
+    #[rstest]
+    fn test_user_dict_tokenizer_with_empty_string() {
+        use std::io::Write;
+
+        let dict_path = std::env::temp_dir().join("lindera_test_empty_dict.csv");
+        let mut file = std::fs::File::create(&dict_path).unwrap();
+        writeln!(file, "테스트,NNG,테스트").unwrap();
+        drop(file);
+
+        let tok = get_tokenizer_with_user_dict("korean", dict_path.to_str().unwrap());
+        let mut tokenizer = LinderaTokenizerWithDict::new(tok);
+
+        let tokens = test_helper(&mut tokenizer, "");
+        assert_eq!(tokens.len(), 0);
+
+        let tokens = test_helper(&mut tokenizer, "    ");
+        assert_eq!(tokens.len(), 0);
+
+        let _ = std::fs::remove_file(&dict_path);
+    }
+
+    #[rstest]
+    fn test_user_dict_tokenizer_caching() {
+        use std::io::Write;
+
+        let dict_path = std::env::temp_dir().join("lindera_test_cache_dict.csv");
+        let mut file = std::fs::File::create(&dict_path).unwrap();
+        writeln!(file, "테스트,NNG,테스트").unwrap();
+        drop(file);
+
+        let path_str = dict_path.to_str().unwrap();
+        let tok1 = get_tokenizer_with_user_dict("korean", path_str);
+        let tok2 = get_tokenizer_with_user_dict("korean", path_str);
+        assert!(
+            Arc::ptr_eq(&tok1, &tok2),
+            "cached tokenizers should be the same Arc instance"
+        );
+
+        let _ = std::fs::remove_file(&dict_path);
     }
 }
