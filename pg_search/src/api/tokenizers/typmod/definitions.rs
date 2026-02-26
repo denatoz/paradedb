@@ -60,6 +60,7 @@ pub struct RegexTypmod {
 // for pdb.lindera
 pub struct LinderaTypmod {
     pub language: LinderaLanguage,
+    pub user_dict: Option<String>,
     pub filters: SearchTokenizerFilters,
 }
 
@@ -136,12 +137,15 @@ impl TypmodRules for RegexTypmod {
 
 impl TypmodRules for LinderaTypmod {
     fn rules() -> Vec<PropertyRule> {
-        vec![rule!(
-            "language",
-            ValueConstraint::StringChoice(vec!["chinese", "japanese", "korean"]),
-            required,
-            positional = 0
-        )]
+        vec![
+            rule!(
+                "language",
+                ValueConstraint::StringChoice(vec!["chinese", "japanese", "korean"]),
+                required,
+                positional = 0
+            ),
+            rule!("user_dict", ValueConstraint::String),
+        ]
     }
 }
 
@@ -273,7 +277,15 @@ impl TryFrom<i32> for LinderaTypmod {
                 }
             })
             .ok_or(typmod::Error::MissingKey("language"))?;
-        Ok(LinderaTypmod { language, filters })
+        let user_dict = parsed
+            .get("user_dict")
+            .and_then(|p| p.as_str())
+            .map(|s| s.to_string());
+        Ok(LinderaTypmod {
+            language,
+            user_dict,
+            filters,
+        })
     }
 }
 

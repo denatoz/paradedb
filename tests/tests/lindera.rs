@@ -171,3 +171,58 @@ async fn lindera_japenese_tokenizer(mut conn: PgConnection) {
         .fetch_one(&mut conn);
     assert_eq!(row.0, 3);
 }
+
+#[rstest]
+async fn lindera_korean_tokenizer_with_user_dict(mut conn: PgConnection) {
+    use std::io::Write;
+
+    // Create a temp user dictionary CSV accessible by PostgreSQL
+    let dict_path = std::env::temp_dir().join("paradedb_test_user_dict.csv");
+    let mut file = std::fs::File::create(&dict_path).unwrap();
+    writeln!(file, "임플란트식립,NNG,임플란트식립").unwrap();
+    writeln!(file, "치근단절제술,NNG,치근단절제술").unwrap();
+    drop(file);
+
+    let dict_path_str = dict_path.to_str().unwrap();
+
+    // Create table and index using typmod with user_dict
+    format!(
+        r#"
+        CREATE TABLE IF NOT EXISTS korean_userdict (
+            id SERIAL PRIMARY KEY,
+            message TEXT
+        );
+
+        INSERT INTO korean_userdict (message) VALUES
+            ('임플란트식립을 진행합니다'),
+            ('치근단절제술 후 경과 관찰'),
+            ('일반 치과 진료 안내');
+
+        CREATE INDEX korean_userdict_idx ON korean_userdict
+        USING bm25 (id, (message::pdb.lindera('korean', 'user_dict={dict_path_str}')))
+        WITH (key_field = 'id');
+        "#
+    )
+    .as_str()
+    .execute(&mut conn);
+
+    // With user dict, "임플란트식립" is a single token, so exact match should work
+    let row: (i32,) =
+        r#"SELECT id FROM korean_userdict WHERE korean_userdict @@@ 'message:임플란트식립' ORDER BY id"#
+            .fetch_one(&mut conn);
+    assert_eq!(row.0, 1);
+
+    // "치근단절제술" as a single token should match row 2
+    let row: (i32,) =
+        r#"SELECT id FROM korean_userdict WHERE korean_userdict @@@ 'message:치근단절제술' ORDER BY id"#
+            .fetch_one(&mut conn);
+    assert_eq!(row.0, 2);
+
+    // "진료" should match row 3 (standard dictionary word)
+    let row: (i32,) =
+        r#"SELECT id FROM korean_userdict WHERE korean_userdict @@@ 'message:진료' ORDER BY id"#
+            .fetch_one(&mut conn);
+    assert_eq!(row.0, 3);
+
+    let _ = std::fs::remove_file(&dict_path);
+}

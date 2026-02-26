@@ -24,7 +24,10 @@ use crate::{
     cjk::ChineseTokenizer,
     code::CodeTokenizer,
     jieba::JiebaTokenizer,
-    lindera::{LinderaChineseTokenizer, LinderaJapaneseTokenizer, LinderaKoreanTokenizer},
+    lindera::{
+        LinderaChineseTokenizer, LinderaJapaneseTokenizer, LinderaKoreanTokenizer,
+        LinderaTokenizerWithDict,
+    },
     token_length::TokenLengthFilter,
     token_trim::TokenTrimFilter,
     unicode_words::UnicodeWordsTokenizer,
@@ -389,7 +392,7 @@ pub enum SearchTokenizer {
         chinese_convert: Option<ConvertMode>,
         filters: SearchTokenizerFilters,
     },
-    Lindera(LinderaLanguage, SearchTokenizerFilters),
+    Lindera(LinderaLanguage, SearchTokenizerFilters, Option<String>),
     UnicodeWordsDeprecated {
         remove_emojis: bool,
         filters: SearchTokenizerFilters,
@@ -565,16 +568,26 @@ impl SearchTokenizer {
                 }
             }
             SearchTokenizer::ChineseLindera(filters)
-            | SearchTokenizer::Lindera(LinderaLanguage::Chinese, filters) => {
+            | SearchTokenizer::Lindera(LinderaLanguage::Chinese, filters, None) => {
                 add_filters!(LinderaChineseTokenizer::default(), filters)
             }
             SearchTokenizer::JapaneseLindera(filters)
-            | SearchTokenizer::Lindera(LinderaLanguage::Japanese, filters) => {
+            | SearchTokenizer::Lindera(LinderaLanguage::Japanese, filters, None) => {
                 add_filters!(LinderaJapaneseTokenizer::default(), filters)
             }
             SearchTokenizer::KoreanLindera(filters)
-            | SearchTokenizer::Lindera(LinderaLanguage::Korean, filters) => {
+            | SearchTokenizer::Lindera(LinderaLanguage::Korean, filters, None) => {
                 add_filters!(LinderaKoreanTokenizer::default(), filters)
+            }
+            SearchTokenizer::Lindera(language, filters, Some(user_dict_path)) => {
+                let lang_str = match language {
+                    LinderaLanguage::Chinese => "chinese",
+                    LinderaLanguage::Japanese => "japanese",
+                    LinderaLanguage::Korean => "korean",
+                    LinderaLanguage::Unspecified => panic!("LinderaLanguage::Unspecified is not supported"),
+                };
+                let tok = crate::lindera::get_tokenizer_with_user_dict(lang_str, user_dict_path);
+                add_filters!(LinderaTokenizerWithDict::new(tok), filters)
             }
             SearchTokenizer::ICUTokenizer(filters) => {
                 add_filters!(ICUTokenizer, filters)
@@ -593,7 +606,7 @@ impl SearchTokenizer {
                     add_filters!(JiebaTokenizer::new(), filters)
                 }
             }
-            SearchTokenizer::Lindera(LinderaLanguage::Unspecified, _) => {
+            SearchTokenizer::Lindera(LinderaLanguage::Unspecified, _, _) => {
                 panic!("LinderaStyle::Unspecified is not supported")
             }
             SearchTokenizer::UnicodeWords {
@@ -628,7 +641,7 @@ impl SearchTokenizer {
             SearchTokenizer::ChineseLindera(filters) => filters,
             SearchTokenizer::JapaneseLindera(filters) => filters,
             SearchTokenizer::KoreanLindera(filters) => filters,
-            SearchTokenizer::Lindera(_, filters) => filters,
+            SearchTokenizer::Lindera(_, filters, _) => filters,
             SearchTokenizer::ICUTokenizer(filters) => filters,
             SearchTokenizer::Jieba { filters, .. } => filters,
             SearchTokenizer::UnicodeWordsDeprecated { filters, .. } => filters,
@@ -701,14 +714,20 @@ impl SearchTokenizer {
                 format!("japanese_lindera{filters_suffix}")
             }
             SearchTokenizer::KoreanLindera(_filters) => format!("korean_lindera{filters_suffix}"),
-            SearchTokenizer::Lindera(style, _filters) => match style {
-                LinderaLanguage::Unspecified => {
-                    panic!("LinderaStyle::Unspecified is not supported")
+            SearchTokenizer::Lindera(style, _filters, user_dict) => {
+                let lang = match style {
+                    LinderaLanguage::Unspecified => {
+                        panic!("LinderaLanguage::Unspecified is not supported")
+                    }
+                    LinderaLanguage::Chinese => "chinese_lindera",
+                    LinderaLanguage::Japanese => "japanese_lindera",
+                    LinderaLanguage::Korean => "korean_lindera",
+                };
+                match user_dict {
+                    Some(path) => format!("{lang}_userdict:{path}{filters_suffix}"),
+                    None => format!("{lang}{filters_suffix}"),
                 }
-                LinderaLanguage::Chinese => format!("chinese_lindera{filters_suffix}"),
-                LinderaLanguage::Japanese => format!("japanese_lindera{filters_suffix}"),
-                LinderaLanguage::Korean => format!("korean_lindera{filters_suffix}"),
-            },
+            }
             SearchTokenizer::ICUTokenizer(_filters) => format!("icu{filters_suffix}"),
             SearchTokenizer::Jieba {
                 chinese_convert,
