@@ -1,0 +1,120 @@
+name: Release pg_search
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.1.0)"
+        required: false
+        default: ""
+      target:
+        description: "Build target (all, linux-amd64, linux-arm64, macos-arm64)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - linux-amd64
+          - linux-arm64
+          - macos-arm64
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  matrix:
+    name: Resolve matrix
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.set.outputs.include }}
+    steps:
+      - id: set
+        shell: bash
+        run: |
+          ALL='[
+            {"target":"linux-amd64","runner":"ubuntu-latest","pg":17},
+            {"target":"linux-arm64","runner":"ubuntu-24.04-arm","pg":17},
+            {"target":"macos-arm64","runner":"macos-latest","pg":17}
+          ]'
+          TARGET="${{ github.event.inputs.target || 'all' }}"
+          if [ "$TARGET" = "all" ]; then
+            echo "include=$(echo "$ALL" | jq -c .)" >> "$GITHUB_OUTPUT"
+          else
+            echo "include=$(echo "$ALL" | jq -c "[.[] | select(.target == \"$TARGET\")]")" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build (${{ matrix.target }}, PG ${{ matrix.pg }})
+    needs: matrix
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.matrix.outputs.include) }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-pg-search
+        with:
+          pg-version: ${{ matrix.pg }}
+
+      - name: Resolve pg_config path
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "PG_CONFIG=$(brew --prefix postgresql@${{ matrix.pg }})/bin/pg_config" >> $GITHUB_ENV
+          else
+            echo "PG_CONFIG=$(which pg_config)" >> $GITHUB_ENV
+          fi
+
+      - name: Package extension
+        run: |
+          cd pg_search
+          cargo pgrx package --pg-config "$PG_CONFIG"
+
+      - name: Prepare archive
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=${GITHUB_REF_NAME#v}
+          fi
+          ARCHIVE="pg_search-${VERSION}-${{ matrix.target }}-pg${{ matrix.pg }}.tar.gz"
+          PKGDIR="target/release/pg_search-pg${{ matrix.pg }}"
+
+          LIB_FILE=$(find "$PKGDIR" -name "pg_search.so" -o -name "pg_search.dylib" | head -1)
+          SHARE_DIR=$(find "$PKGDIR" -path "*/extension/pg_search.control" -exec dirname {} \;)
+
+          mkdir -p staging/lib staging/share/extension
+          cp "$LIB_FILE" staging/lib/
+          cp "$SHARE_DIR"/* staging/share/extension/
+
+          tar czf "$ARCHIVE" -C staging .
+          echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg_search-${{ matrix.target }}-pg${{ matrix.pg }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version || github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*.tar.gz
